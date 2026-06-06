@@ -975,7 +975,7 @@
               <option value="youtube-4k60">YouTube — 4K, 60 khung/giây</option>
               <option value="tiktok-1080p60" selected>TikTok — 1080p dọc (khuyên dùng)</option>
               <option value="tiktok-4k60">TikTok — 4K dọc (render chậm)</option>
-              <option value="facebook-1080p60">Facebook — 1080p, 60 khung/giây</option>
+              <option value="facebook-1080p60">Facebook — 1080p, 30 khung/giây</option>
             </select>
           </div>
           <div class="field-group">
@@ -1006,7 +1006,7 @@
             </select>
           </div>
           <div class="field-group">
-            <label for="videoBitrateMbps">Bitrate video <span class="label-note">(1080p: 8–15 Mbps)</span></label>
+            <label for="videoBitrateMbps">Bitrate video <span class="label-note" id="bitrateHint">(1080p: 8–15 Mbps)</span></label>
             <select id="videoBitrateMbps">
               <option value="8">8 Mbps</option>
               <option value="10">10 Mbps</option>
@@ -1454,7 +1454,45 @@
       });
     }
 
+    let applyingPlatformPreset = false;
+
+    const BITRATE_OPTIONS_1080P = [
+      { v: "8", t: "8 Mbps" },
+      { v: "10", t: "10 Mbps" },
+      { v: "12", t: "12 Mbps (khuyên dùng)" },
+      { v: "15", t: "15 Mbps" },
+    ];
+    const BITRATE_OPTIONS_4K = [
+      { v: "25", t: "25 Mbps" },
+      { v: "30", t: "30 Mbps" },
+      { v: "35", t: "35 Mbps" },
+      { v: "40", t: "40 Mbps (khuyên dùng)" },
+      { v: "45", t: "45 Mbps" },
+      { v: "50", t: "50 Mbps" },
+    ];
+
+    function refreshBitrateOptions(preferred) {
+      const resolution = document.getElementById("resolution").value;
+      const sel = document.getElementById("videoBitrateMbps");
+      const hint = document.getElementById("bitrateHint");
+      const opts = resolution === "4k" ? BITRATE_OPTIONS_4K : BITRATE_OPTIONS_1080P;
+      const prev = preferred || sel.value;
+      sel.innerHTML = opts.map((o) =>
+        `<option value="${o.v}">${o.t}</option>`
+      ).join("");
+      hint.textContent = resolution === "4k" ? "(4K: 25–50 Mbps)" : "(1080p: 8–15 Mbps)";
+      const valid = opts.some((o) => o.v === prev);
+      sel.value = valid ? prev : (resolution === "4k" ? "40" : "12");
+    }
+
+    function markCustomPreset() {
+      if (applyingPlatformPreset) return;
+      const presetEl = document.getElementById("platformPreset");
+      if (presetEl.value !== "custom") presetEl.value = "custom";
+    }
+
     function applyPlatformPreset() {
+      applyingPlatformPreset = true;
       const platform = document.getElementById("platformPreset").value;
       const resolutionSelect = document.getElementById("resolution");
       const fpsModeSelect = document.getElementById("fpsMode");
@@ -1465,31 +1503,41 @@
         resolutionSelect.value = "1080p";
         fpsModeSelect.value = "60";
         presetSelect.value = "medium";
-        bitrateSelect.value = "12";
+        refreshBitrateOptions("12");
       } else if (platform === "youtube-4k60") {
         resolutionSelect.value = "4k";
         fpsModeSelect.value = "60";
         presetSelect.value = "slow";
-        bitrateSelect.value = "15";
+        refreshBitrateOptions("40");
       } else if (platform === "tiktok-1080p60") {
         resolutionSelect.value = "1080p";
         fpsModeSelect.value = "auto";
         presetSelect.value = "medium";
-        bitrateSelect.value = "12";
+        refreshBitrateOptions("12");
       } else if (platform === "tiktok-4k60") {
         resolutionSelect.value = "4k";
         fpsModeSelect.value = "60";
         presetSelect.value = "slow";
-        bitrateSelect.value = "15";
+        refreshBitrateOptions("40");
       } else if (platform === "facebook-1080p60") {
         resolutionSelect.value = "1080p";
         fpsModeSelect.value = "30";
         presetSelect.value = "medium";
-        bitrateSelect.value = "10";
+        refreshBitrateOptions("10");
+      } else {
+        refreshBitrateOptions();
       }
+      applyingPlatformPreset = false;
     }
 
     document.getElementById("platformPreset").addEventListener("change", applyPlatformPreset);
+    document.getElementById("resolution").addEventListener("change", () => {
+      refreshBitrateOptions();
+      markCustomPreset();
+    });
+    ["fpsMode", "preset", "videoBitrateMbps"].forEach((id) => {
+      document.getElementById(id).addEventListener("change", markCustomPreset);
+    });
     document.getElementById("platformPreset").value = "tiktok-1080p60";
     applyPlatformPreset();
 

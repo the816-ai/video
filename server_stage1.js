@@ -347,22 +347,27 @@ function isNearFps(value, target, tolerance) {
   return Number.isFinite(value) && Math.abs(value - target) <= tolerance;
 }
 
-/** Giữ FPS gốc nếu chuẩn; auto chọn 30/60 khi gốc lệch nhiều. */
+/** Auto: giữ 30/60 nếu clip đồng nhất; ghép clip lệch FPS → ưu tiên 60; còn lại snap 30/60. */
 function resolveOutputFps(sourceFpsList, fpsMode) {
   const mode = validateFpsMode(fpsMode);
   if (mode === "30") return 30;
   if (mode === "60") return 60;
 
   const src = (sourceFpsList || []).filter((f) => Number.isFinite(f) && f > 0);
-  const avg = src.length ? src.reduce((a, b) => a + b, 0) / src.length : 30;
+  if (src.length === 0) return 30;
 
-  if (isNearFps(avg, 23.976, 0.02) || isNearFps(avg, 24, 0.5)) return 24;
-  if (isNearFps(avg, 25, 0.5)) return 25;
-  if (isNearFps(avg, 29.97, 0.02) || isNearFps(avg, 30, 1)) return 30;
-  if (isNearFps(avg, 50, 1)) return 50;
-  if (isNearFps(avg, 59.94, 0.02) || isNearFps(avg, 60, 2)) return 60;
+  const minF = Math.min(...src);
+  const maxF = Math.max(...src);
+  const avg = src.reduce((a, b) => a + b, 0) / src.length;
 
-  return avg >= 45 ? 60 : 30;
+  if (maxF - minF <= 1.5) {
+    if (isNearFps(avg, 59.94, 0.06) || isNearFps(avg, 60, 1.5)) return 60;
+    if (isNearFps(avg, 29.97, 0.06) || isNearFps(avg, 30, 1.5)) return 30;
+    return avg >= 45 ? 60 : 30;
+  }
+
+  if (maxF >= 50) return 60;
+  return 30;
 }
 
 function fpsFilterValue(fps) {
@@ -378,7 +383,6 @@ function getVideoBitrateSettings(resolution, videoBitrateMbps) {
     return {
       target: `${mbps}M`,
       max: `${Math.min(50, mbps + 8)}M`,
-      min: `${Math.max(25, mbps - 8)}M`,
       bufsize: `${mbps * 2}M`,
     };
   }
@@ -386,7 +390,6 @@ function getVideoBitrateSettings(resolution, videoBitrateMbps) {
   return {
     target: `${mbps}M`,
     max: `${Math.min(15, mbps + 3)}M`,
-    min: `${Math.max(8, mbps - 4)}M`,
     bufsize: `${mbps * 2}M`,
   };
 }
@@ -397,16 +400,21 @@ function resolveAudioSampleRate(sourceRates) {
   return 48000;
 }
 
-function addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset }) {
+function addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset, fps }) {
   const br = getVideoBitrateSettings(resolution, videoBitrateMbps);
+  const outFps = Number(fps) || 30;
+  const level = resolution === "4k" ? "5.1" : (outFps >= 50 ? "4.2" : "4.0");
+  const gop = Math.max(30, Math.round(outFps * 2));
+
   args.push("-c:v", "libx264");
   args.push("-preset", validatePreset(preset));
   args.push("-profile:v", "high");
+  args.push("-level", level);
   args.push("-pix_fmt", "yuv420p");
   args.push("-b:v", br.target);
   args.push("-maxrate", br.max);
-  args.push("-minrate", br.min);
   args.push("-bufsize", br.bufsize);
+  args.push("-g", String(gop), "-keyint_min", String(gop));
 }
 
 function addAudioEncodeArgs(args, audioSampleRate) {
@@ -837,7 +845,7 @@ function addMetadataArgs(args, mode) {
   args.push("-map_metadata", "-1");
   args.push("-map_metadata:s:v", "-1");
   args.push("-map_metadata:s:a", "-1");
-  if (mode === "all") {
+  if (mode === "all" || mode === "sensitive") {
     args.push("-movflags", "+faststart");
   }
 }
@@ -1002,7 +1010,7 @@ function startFfmpegJob({
   for (const f of inputs) args.push("-i", path.resolve(f));
 
   args.push("-filter_complex_script", filterScript, "-map", mapVideo, "-map", mapAudio);
-  addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset });
+  addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset, fps });
   addAudioEncodeArgs(args, audioSampleRate);
 
   addMetadataArgs(args, metadata.mode);
@@ -1263,22 +1271,16 @@ function resolveOutputSettings(body, inputInfos) {
   const platformDefs = platform !== "custom" ? buildPlatformDefaults(platform) : null;
   const infos = Array.isArray(inputInfos) ? inputInfos : [];
 
-  let fpsMode = "auto";
-  let videoBitrateMbps = 12;
-  let preset = "medium";
-  let resolution = "1080p";
-
-  if (platformDefs) {
-    resolution = validateResolution(platformDefs.resolution);
-    fpsMode = validateFpsMode(platformDefs.fpsMode);
-    videoBitrateMbps = clamp(Number(platformDefs.videoBitrateMbps), 8, 50);
-    preset = validatePreset(platformDefs.preset);
-  } else {
-    resolution = validateResolution(body.resolution || "1080p");
-    fpsMode = validateFpsMode(body.fpsMode || body.fps || "auto");
-    videoBitrateMbps = clamp(Number(body.videoBitrateMbps || body.crf || 12), 8, resolution === "4k" ? 50 : 15);
-    preset = validatePreset(body.preset || "medium");
-  }
+  const resolution = validateResolution(body.resolution || platformDefs?.resolution || "1080p");
+  const fpsMode = validateFpsMode(body.fpsMode || body.fps || platformDefs?.fpsMode || "auto");
+  const preset = validatePreset(body.preset || platformDefs?.preset || "medium");
+  const brMin = resolution === "4k" ? 25 : 8;
+  const brMax = resolution === "4k" ? 50 : 15;
+  const videoBitrateMbps = clamp(
+    Number(body.videoBitrateMbps || platformDefs?.videoBitrateMbps || 12),
+    brMin,
+    brMax
+  );
 
   const outputFps = resolveOutputFps(infos.map((i) => i.fps), fpsMode);
   const audioSampleRate = resolveAudioSampleRate(infos.map((i) => i.audioSampleRate));
