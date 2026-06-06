@@ -1,0 +1,14 @@
+{
+  "name": "video-ffmpeg-tool",
+  "version": "1.0.0",
+  "description": "Tool ghép video và chèn chữ trong suốt bằng FFmpeg (Node.js)",
+  "main": "server_stage1.js",
+  "scripts": {
+    "start": "node server_stage1.js",
+    "dev": "node server_stage1.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.1"
+  }
+}

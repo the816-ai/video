@@ -1,0 +1,12 @@
+node_modules/
+uploads/
+outputs/
+.env
+.env.*
+*.log
+.DS_Store
+Thumbs.db
+_test_*
+_spawn_*
+*_test_*.mp4
+*_e2e_*
