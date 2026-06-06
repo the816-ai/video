@@ -762,6 +762,36 @@ function updateJobProgress(job, curSec) {
   job.etaSeconds = Number.isFinite(etaSec) && etaSec >= 0 ? etaSec : NaN;
 }
 
+function safeOutputBaseName(originalName) {
+  const ext = path.extname(String(originalName || ""));
+  const base = path.basename(String(originalName || "video"), ext);
+  const cleaned = base.replace(/[^\w\u00C0-\u024F.-]+/gi, "_").replace(/_+/g, "_").slice(0, 60);
+  return cleaned || "video";
+}
+
+function buildUpscaleOutputName(originalName, resolution, index) {
+  const tag = resolution === "4k" ? "4k" : "1080p";
+  const suffix = Number.isFinite(index) ? `-${index}` : "";
+  return `upscaled-${tag}-${safeOutputBaseName(originalName)}-${Date.now().toString(36)}${suffix}.mp4`;
+}
+
+function buildUpscaleFilterGraph(inputInfo, resolution, fps, aspectRatio, jobId) {
+  const target = getTargetSize(resolution, aspectRatio || "portrait");
+  const workDir = ensureJobWorkDir(jobId);
+  const rotFilter = getRotationTransposeFilter(inputInfo.rotation);
+  const scalePad = buildScalePadChain(inputInfo, target);
+  const vChain = rotFilter
+    ? `[0:v]${rotFilter},${scalePad},fps=${fps},format=yuv420p[vout]`
+    : `[0:v]${scalePad},fps=${fps},format=yuv420p[vout]`;
+  const dur = Number.isFinite(inputInfo.duration) ? inputInfo.duration : 1;
+  const aChain = inputInfo.hasAudio
+    ? `[0:a]aformat=channel_layouts=stereo:sample_rates=48000,aresample=async=1[aout]`
+    : `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[aout]`;
+  const filterScript = "filter.txt";
+  fs.writeFileSync(path.join(workDir, filterScript), `${vChain};${aChain}`, "utf8");
+  return { workDir, filterScript };
+}
+
 function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFontPath, resolution, fps, aspectRatio, jobId }) {
   const target = getTargetSize(resolution, aspectRatio || "landscape");
   const n = inputInfos.length;
@@ -831,23 +861,43 @@ function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFon
   return { workDir, filterScript };
 }
 
-function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines, resolvedFontPath, resolution, fps, crf, preset, outputPath, metadata, aspectRatio }) {
-  const { workDir, filterScript } = buildFilterGraph({
-    inputInfos,
-    textLines,
-    perClipTextLines,
-    resolvedFontPath,
-    resolution,
-    fps,
-    aspectRatio,
-    jobId,
-  });
+function startFfmpegJob({
+  jobId,
+  inputs,
+  inputInfos,
+  textLines,
+  perClipTextLines,
+  resolvedFontPath,
+  resolution,
+  fps,
+  crf,
+  preset,
+  outputPath,
+  metadata,
+  aspectRatio,
+  progressJob,
+  mapVideo = "[vout]",
+  mapAudio = "[acat]",
+  filterBuild,
+}) {
+  const { workDir, filterScript } = filterBuild
+    ? filterBuild()
+    : buildFilterGraph({
+        inputInfos,
+        textLines,
+        perClipTextLines,
+        resolvedFontPath,
+        resolution,
+        fps,
+        aspectRatio,
+        jobId,
+      });
 
   const absOutput = path.resolve(outputPath);
   const args = ["-y"];
   for (const f of inputs) args.push("-i", path.resolve(f));
 
-  args.push("-filter_complex_script", filterScript, "-map", "[vout]", "-map", "[acat]");
+  args.push("-filter_complex_script", filterScript, "-map", mapVideo, "-map", mapAudio);
   args.push("-c:v", "libx265", "-preset", preset, "-crf", String(crf), "-pix_fmt", "yuv420p", "-tag:v", "hvc1");
   args.push("-c:a", "aac", "-b:a", "192k");
 
@@ -863,8 +913,8 @@ function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines
       cwd: workDir,
     });
 
-    const job = jobs.get(jobId);
-    if (job) job.procPid = proc.pid;
+    const job = progressJob || jobs.get(jobId);
+    if (job && !progressJob) job.procPid = proc.pid;
 
     let lastErr = "";
     let stdoutBuf = "";
@@ -910,7 +960,10 @@ function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines
       activeFfmpegJobs = Math.max(0, activeFfmpegJobs - 1);
       cleanupJobWorkDir(jobId);
       if (code === 0) {
-        if (jobs.has(jobId)) {
+        if (progressJob) {
+          progressJob.progress = 100;
+          progressJob.status = "done";
+        } else if (jobs.has(jobId)) {
           const j = jobs.get(jobId);
           j.status = "done";
           j.progress = 100;
@@ -918,7 +971,11 @@ function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines
         resolve({ ok: true });
       } else {
         const hint = translateFfmpegError(lastErr);
-        if (jobs.has(jobId)) {
+        if (progressJob) {
+          progressJob.status = "error";
+          progressJob.errorHint = hint;
+          progressJob.errorDetail = (lastErr || `FFmpeg thoát mã ${code}`).slice(-3000);
+        } else if (jobs.has(jobId)) {
           const j = jobs.get(jobId);
           j.status = "error";
           j.errorHint = hint;
@@ -931,7 +988,11 @@ function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines
     proc.on("error", (err) => {
       activeFfmpegJobs = Math.max(0, activeFfmpegJobs - 1);
       cleanupJobWorkDir(jobId);
-      if (jobs.has(jobId)) {
+      if (progressJob) {
+        progressJob.status = "error";
+        progressJob.errorHint = err.message || String(err);
+        progressJob.errorDetail = progressJob.errorHint;
+      } else if (jobs.has(jobId)) {
         const j = jobs.get(jobId);
         j.status = "error";
         j.errorHint = err.message || String(err);
@@ -940,6 +1001,96 @@ function startFfmpegJob({ jobId, inputs, inputInfos, textLines, perClipTextLines
       reject(err);
     });
   });
+}
+
+async function processBatchUpscale(batchJob, inputPaths, metadataMode) {
+  const { resolution, fps, crf, preset, aspectRatio } = batchJob.settings;
+  const metadata = { mode: metadataMode };
+
+  for (let i = 0; i < batchJob.items.length; i++) {
+    const item = batchJob.items[i];
+    batchJob.currentIndex = i;
+    batchJob.currentName = item.originalName;
+    item.status = "processing";
+
+    const subJobId = `${batchJob.id}-f${i}`;
+    const progressJob = {
+      status: "processing",
+      progress: 0,
+      etaSeconds: NaN,
+      lastOutTimeSec: 0,
+      startedAt: Date.now(),
+      totalDurationSec: item.durationSec,
+      lastSpeed: 0,
+    };
+
+    const refreshBatchProgress = () => {
+      const slice = (progressJob.progress || 0) / 100;
+      batchJob.progress = ((i + slice) / batchJob.items.length) * 100;
+    };
+
+    const tick = setInterval(refreshBatchProgress, 400);
+
+    try {
+      await startFfmpegJob({
+        jobId: subJobId,
+        inputs: [item.inputPath],
+        inputInfos: [{ duration: item.durationSec, hasAudio: item.hasAudio, rotation: item.rotation, displayWidth: item.displayWidth, displayHeight: item.displayHeight, width: item.width, height: item.height }],
+        textLines: [],
+        perClipTextLines: null,
+        resolvedFontPath: "",
+        resolution,
+        fps,
+        crf,
+        preset,
+        outputPath: item.outputPath,
+        metadata,
+        aspectRatio,
+        progressJob,
+        mapVideo: "[vout]",
+        mapAudio: "[aout]",
+        filterBuild: () => buildUpscaleFilterGraph(
+          {
+            duration: item.durationSec,
+            hasAudio: item.hasAudio,
+            rotation: item.rotation,
+            displayWidth: item.displayWidth,
+            displayHeight: item.displayHeight,
+            width: item.width,
+            height: item.height,
+          },
+          resolution,
+          fps,
+          aspectRatio,
+          subJobId
+        ),
+      });
+      item.status = "done";
+      batchJob.completedCount += 1;
+    } catch (err) {
+      item.status = "error";
+      item.errorHint = err.message || String(err);
+      batchJob.failedCount += 1;
+    } finally {
+      clearInterval(tick);
+      try { fs.unlinkSync(item.inputPath); } catch {}
+      refreshBatchProgress();
+    }
+  }
+
+  batchJob.currentIndex = null;
+  batchJob.currentName = null;
+  batchJob.progress = 100;
+
+  if (batchJob.completedCount === batchJob.items.length) {
+    batchJob.status = "done";
+  } else if (batchJob.completedCount > 0) {
+    batchJob.status = "partial";
+  } else {
+    batchJob.status = "error";
+    batchJob.errorHint = "Không nâng cấp được video nào.";
+  }
+  batchJob.doneAt = Date.now();
 }
 
 function cleanupUploads(paths) {
@@ -1174,9 +1325,112 @@ app.post("/api/process", upload.array("videos", 20), async (req, res) => {
   }
 });
 
+app.post("/api/batch-upscale", upload.array("videos", 20), async (req, res) => {
+  const uploadedPaths = (req.files || []).map((f) => f.path);
+
+  try {
+    if (activeFfmpegJobs >= MAX_CONCURRENT_JOBS) {
+      cleanupUploads(uploadedPaths);
+      return res.status(429).json({
+        error: "Server đang bận.",
+        detail: `Tối đa ${MAX_CONCURRENT_JOBS} job render cùng lúc. Vui lòng thử lại sau.`,
+      });
+    }
+
+    const files = req.files || [];
+    if (files.length === 0) {
+      return res.status(400).json({ error: "Chưa chọn video." });
+    }
+
+    const { resolution, fps, crf, preset } = resolveOutputSettings(req.body);
+    const aspectRatio = validateAspectRatio(req.body.aspectRatio || "portrait");
+    const metadataMode = req.body.metadataMode === "sensitive" ? "sensitive" : "all";
+
+    const jobId = crypto.randomUUID();
+    const accessToken = crypto.randomBytes(16).toString("hex");
+    const inputInfos = await Promise.all(files.map((f) => probeFileInfo(f.path)));
+
+    const items = files.map((f, i) => {
+      const info = inputInfos[i];
+      const outputName = buildUpscaleOutputName(f.originalname, resolution, i);
+      return {
+        originalName: f.originalname,
+        inputPath: f.path,
+        outputName,
+        outputPath: path.join(OUTPUT_DIR, outputName),
+        status: "pending",
+        durationSec: Number.isFinite(info.duration) ? info.duration : 0,
+        hasAudio: info.hasAudio,
+        rotation: info.rotation,
+        displayWidth: info.displayWidth,
+        displayHeight: info.displayHeight,
+        width: info.width,
+        height: info.height,
+        errorHint: null,
+      };
+    });
+
+    const batchJob = {
+      id: jobId,
+      type: "batch-upscale",
+      status: "processing",
+      progress: 0,
+      completedCount: 0,
+      failedCount: 0,
+      currentIndex: 0,
+      currentName: items[0]?.originalName || null,
+      createdAt: Date.now(),
+      startedAt: Date.now(),
+      accessToken,
+      settings: { resolution, fps, crf, preset, aspectRatio },
+      items,
+    };
+
+    jobs.set(jobId, batchJob);
+
+    processBatchUpscale(batchJob, uploadedPaths, metadataMode).catch(() => {});
+
+    return res.json({
+      success: true,
+      message: "Đang nâng cấp hàng loạt...",
+      jobId,
+      accessToken,
+      totalCount: items.length,
+    });
+  } catch (e) {
+    cleanupUploads(uploadedPaths);
+    return res.status(500).json({
+      error: "Lỗi khi tạo job nâng cấp hàng loạt.",
+      detail: String(e.message || e).slice(0, 2000),
+    });
+  }
+});
+
 app.get("/api/job/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
   if (!job) return res.status(404).json({ error: "Không tìm thấy job." });
+
+  if (job.type === "batch-upscale") {
+    return res.json({
+      type: job.type,
+      status: job.status,
+      progress: job.progress ?? 0,
+      completedCount: job.completedCount ?? 0,
+      failedCount: job.failedCount ?? 0,
+      totalCount: job.items?.length ?? 0,
+      currentIndex: job.currentIndex,
+      currentName: job.currentName,
+      items: (job.items || []).map((it, i) => ({
+        name: it.originalName,
+        status: it.status,
+        outputUrl: it.status === "done"
+          ? `/api/download/${req.params.jobId}/${i}?token=${job.accessToken}`
+          : null,
+        errorHint: it.errorHint || null,
+      })),
+      errorHint: job.status === "error" ? job.errorHint || null : null,
+    });
+  }
 
   const downloadUrl =
     job.status === "done"
@@ -1195,8 +1449,30 @@ app.get("/api/job/:jobId", (req, res) => {
   });
 });
 
+app.get("/api/download/:jobId/:fileIndex", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job || job.type !== "batch-upscale") {
+    return res.status(404).json({ error: "Job không tồn tại hoặc không phải batch." });
+  }
+  if (req.query.token !== job.accessToken) {
+    return res.status(403).json({ error: "Token tải file không hợp lệ." });
+  }
+  const idx = Number(req.params.fileIndex);
+  const item = job.items?.[idx];
+  if (!item || item.status !== "done") {
+    return res.status(404).json({ error: "File chưa sẵn sàng hoặc không tồn tại." });
+  }
+  if (!fs.existsSync(item.outputPath)) {
+    return res.status(404).json({ error: "File đầu ra đã bị xóa." });
+  }
+  res.download(item.outputPath, item.outputName);
+});
+
 app.get("/api/download/:jobId", (req, res) => {
   const job = jobs.get(req.params.jobId);
+  if (!job || job.type === "batch-upscale") {
+    return res.status(404).json({ error: "File chưa sẵn sàng hoặc không tồn tại." });
+  }
   if (!job || job.status !== "done") {
     return res.status(404).json({ error: "File chưa sẵn sàng hoặc không tồn tại." });
   }

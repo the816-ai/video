@@ -350,6 +350,71 @@
 
     .file-list button:hover { background: var(--error-soft); }
 
+    .workflow-tabs {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .workflow-tab {
+      padding: 0.9rem 1rem;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border);
+      background: var(--bg-soft);
+      color: var(--text);
+      font-weight: 700;
+      font-size: 0.92rem;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    .workflow-tab span {
+      display: block;
+      font-weight: 500;
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 0.2rem;
+    }
+
+    .workflow-tab.active {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .batch-hint {
+      padding: 0.85rem 1rem;
+      background: var(--accent-soft);
+      border: 1px solid rgba(99, 102, 241, 0.25);
+      border-radius: var(--radius-sm);
+      font-size: 0.84rem;
+      color: #c7d2fe;
+      margin-bottom: 1rem;
+      line-height: 1.5;
+    }
+
+    .batch-downloads {
+      margin-top: 0.75rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+
+    .batch-downloads a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+      padding: 0.45rem 0.75rem;
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid rgba(16, 185, 129, 0.35);
+      border-radius: 8px;
+      color: #6ee7b7;
+      text-decoration: none;
+      font-size: 0.82rem;
+    }
+
+    .batch-downloads a:hover { filter: brightness(1.08); }
+
     .mode-tabs {
       display: grid;
       grid-template-columns: 1fr 1fr;
@@ -762,6 +827,7 @@
     @media (max-width: 560px) {
       .grid-2 { grid-template-columns: 1fr; }
       .mode-tabs { grid-template-columns: 1fr; }
+      .workflow-tabs { grid-template-columns: 1fr; }
       .steps-bar { flex-direction: column; }
     }
   </style>
@@ -773,7 +839,7 @@
         <div class="brand-icon">🎬</div>
         <div>
           <h1>Studio Ghép Video</h1>
-          <p>Ghép clip · Chèn chữ · Xuất H.265</p>
+          <p>Ghép clip · Nâng cấp hàng loạt · H.265</p>
         </div>
       </div>
       <div id="ffmpegBadge" class="status-pill pending">Đang kiểm tra hệ thống...</div>
@@ -781,9 +847,20 @@
   </header>
 
   <main class="container">
-    <div class="steps-bar">
+    <div class="workflow-tabs">
+      <button type="button" class="workflow-tab active" data-workflow="merge">
+        🔗 Ghép video
+        <span>Ghép nhiều clip · chèn chữ TikTok</span>
+      </button>
+      <button type="button" class="workflow-tab" data-workflow="batch">
+        ⬆️ Nâng cấp hàng loạt
+        <span>Mỗi video xuất riêng · 9:16 · 1080p/4K</span>
+      </button>
+    </div>
+
+    <div class="steps-bar" id="stepsBar">
       <div class="step-chip active"><strong>Bước 1</strong>Chọn video</div>
-      <div class="step-chip active"><strong>Bước 2</strong>Soạn chữ</div>
+      <div class="step-chip active" id="step2Chip"><strong>Bước 2</strong>Soạn chữ</div>
       <div class="step-chip active"><strong>Bước 3</strong>Cài đặt & xuất</div>
     </div>
 
@@ -794,7 +871,7 @@
           <div class="card-num">1</div>
           <div>
             <div class="card-title">Tải video lên</div>
-            <div class="card-desc">Hệ thống tự chuẩn hóa độ phân giải, khung hình/giây trước khi ghép</div>
+            <div class="card-desc" id="step1Desc">Hệ thống tự chuẩn hóa độ phân giải, khung hình/giây trước khi ghép</div>
           </div>
         </div>
 
@@ -808,7 +885,7 @@
       </section>
 
       <!-- Bước 2 -->
-      <section class="card">
+      <section class="card" id="mergeStep2Section">
         <div class="card-head">
           <div class="card-num">2</div>
           <div>
@@ -882,6 +959,11 @@
             <div class="card-title">Cài đặt xuất file</div>
             <div class="card-desc">Chọn nền tảng hoặc tùy chỉnh thông số kỹ thuật</div>
           </div>
+        </div>
+
+        <div class="batch-hint" id="batchHint" style="display:none;">
+          Mỗi file được nâng cấp <strong>riêng</strong> — giữ tỉ lệ <strong>9:16</strong>, upscale Lanczos lên 1080p hoặc 4K.
+          Không ghép clip, không chèn chữ. Tải từng file sau khi xử lý xong.
         </div>
 
         <div class="grid-2">
@@ -969,7 +1051,37 @@
 
     let selectedFiles = [];
     let textMode = "outfit";
+    let workflowMode = "merge";
     let outfitStore = {};
+
+    const mergeStep2Section = document.getElementById("mergeStep2Section");
+    const batchHint = document.getElementById("batchHint");
+    const step1Desc = document.getElementById("step1Desc");
+    const step2Chip = document.getElementById("step2Chip");
+    const workflowTabs = document.querySelectorAll(".workflow-tab");
+
+    function updateWorkflowUI() {
+      const isBatch = workflowMode === "batch";
+      mergeStep2Section.style.display = isBatch ? "none" : "block";
+      batchHint.style.display = isBatch ? "block" : "none";
+      step2Chip.style.display = isBatch ? "none" : "";
+      step1Desc.textContent = isBatch
+        ? "Chọn nhiều video — mỗi file sẽ được nâng cấp và xuất riêng"
+        : "Hệ thống tự chuẩn hóa độ phân giải, khung hình/giây trước khi ghép";
+      submitBtn.textContent = isBatch
+        ? "⬆️ Bắt đầu nâng cấp hàng loạt"
+        : "🚀 Bắt đầu ghép & xuất video";
+      if (isBatch) renderFileList();
+    }
+
+    workflowTabs.forEach((tab) => {
+      tab.addEventListener("click", () => {
+        workflowMode = tab.dataset.workflow;
+        workflowTabs.forEach((t) => t.classList.toggle("active", t === tab));
+        updateWorkflowUI();
+      });
+    });
+    updateWorkflowUI();
 
     const addTextLineBtn = document.getElementById("addTextLine");
     const textLinesContainer = document.getElementById("textLinesContainer");
@@ -1103,6 +1215,7 @@
     }
 
     function renderOutfitSets() {
+      if (workflowMode === "batch") return;
       syncOutfitStoreFromUI();
       outfitSetsContainer.innerHTML = "";
 
@@ -1373,6 +1486,30 @@
     document.getElementById("platformPreset").value = "tiktok-1080p60";
     applyPlatformPreset();
 
+    function showBatchStatus(jd) {
+      const doneItems = (jd.items || []).filter((it) => it.status === "done" && it.outputUrl);
+      const errItems = (jd.items || []).filter((it) => it.status === "error");
+      let html = "";
+      if (jd.status === "done" || jd.status === "partial") {
+        html += `<strong>Hoàn tất ${jd.completedCount}/${jd.totalCount} video!</strong>`;
+        if (jd.failedCount > 0) {
+          html += `<br><small>${jd.failedCount} file lỗi.</small>`;
+        }
+        if (doneItems.length > 0) {
+          html += `<div class="batch-downloads">${doneItems.map((it) =>
+            `<a href="${it.outputUrl}" download>⬇ ${escapeHtml(it.name)}</a>`
+          ).join("")}</div>`;
+        }
+        showStatus(html, jd.failedCount > 0 ? "info" : "success");
+      } else if (jd.status === "error") {
+        showStatus(
+          `<strong>${jd.errorHint || "Tất cả file đều lỗi"}</strong>` +
+          (errItems.length ? `<br><small>${errItems.map((it) => escapeHtml(it.name)).join(", ")}</small>` : ""),
+          "error"
+        );
+      }
+    }
+
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
 
@@ -1383,10 +1520,6 @@
 
       const formData = new FormData();
       selectedFiles.forEach((f) => formData.append("videos", f));
-      formData.append("order", JSON.stringify(selectedFiles.map((_, i) => i)));
-      const textOn = isTextEnabled();
-      formData.append("textEnabled", textOn ? "1" : "0");
-      formData.append("textMode", textMode);
       formData.append("platformPreset", document.getElementById("platformPreset").value);
       formData.append("resolution", document.getElementById("resolution").value);
       formData.append("fps", document.getElementById("fps").value);
@@ -1395,8 +1528,16 @@
       formData.append("metadataMode", document.getElementById("metadataMode").value);
 
       const platformPreset = document.getElementById("platformPreset").value;
-      const isPortraitExport = textMode === "outfit" || platformPreset.startsWith("tiktok-");
+      const isPortraitExport = workflowMode === "batch" || textMode === "outfit" || platformPreset.startsWith("tiktok-");
       formData.append("aspectRatio", isPortraitExport ? "portrait" : "landscape");
+
+      const apiUrl = workflowMode === "batch" ? "/api/batch-upscale" : "/api/process";
+
+      if (workflowMode === "merge") {
+      formData.append("order", JSON.stringify(selectedFiles.map((_, i) => i)));
+      const textOn = isTextEnabled();
+      formData.append("textEnabled", textOn ? "1" : "0");
+      formData.append("textMode", textMode);
 
       if (textOn) {
         if (textMode === "outfit") {
@@ -1413,6 +1554,7 @@
           formData.append("fontFile", fontFileInput.value || "");
           formData.append("textLines", JSON.stringify(enabledLines));
         }
+      }
       }
 
       submitBtn.disabled = true;
@@ -1433,7 +1575,7 @@
       };
 
       try {
-        const res = await fetch("/api/process", { method: "POST", body: formData });
+        const res = await fetch(apiUrl, { method: "POST", body: formData });
         const data = await res.json();
 
         if (!data.success) {
@@ -1445,9 +1587,10 @@
           return;
         }
 
-        document.getElementById("progressText").textContent = textOn
-          ? "Đang ghép video và chèn chữ…"
-          : "Đang ghép video…";
+        const isBatch = workflowMode === "batch";
+        document.getElementById("progressText").textContent = isBatch
+          ? "Đang nâng cấp video hàng loạt…"
+          : (isTextEnabled() ? "Đang ghép video và chèn chữ…" : "Đang ghép video…");
 
         pollTimer = setInterval(async () => {
           try {
@@ -1455,6 +1598,18 @@
             const pct = clampPct(jd.progress ?? 0);
             document.getElementById("progressFill").style.width = `${pct}%`;
             progressPct.textContent = `${pct.toFixed(0)}%`;
+
+            if (isBatch) {
+              const cur = jd.currentName ? ` — ${jd.currentName}` : "";
+              const cnt = `${jd.completedCount ?? 0}/${jd.totalCount ?? "?"}`;
+              document.getElementById("progressText").textContent = `Đang xử lý ${cnt}${cur}`;
+              if (jd.status === "done" || jd.status === "partial" || jd.status === "error") {
+                resetUi();
+                showBatchStatus(jd);
+              }
+              return;
+            }
+
             const eta = jd.etaText ? jd.etaText : "đang tính…";
             document.getElementById("progressText").textContent = `Còn khoảng ${eta} — vui lòng đợi`;
 
