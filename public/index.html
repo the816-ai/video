@@ -839,7 +839,7 @@
         <div class="brand-icon">🎬</div>
         <div>
           <h1>Studio Ghép Video</h1>
-          <p>Ghép clip · Nâng cấp hàng loạt · H.265</p>
+          <p>Ghép clip · Nâng cấp hàng loạt · H.264 MP4</p>
         </div>
       </div>
       <div id="ffmpegBadge" class="status-pill pending">Đang kiểm tra hệ thống...</div>
@@ -990,22 +990,29 @@
             </p>
           </div>
           <div class="field-group">
-            <label for="fps">Tốc độ khung hình</label>
-            <select id="fps" disabled>
-              <option value="60" selected>60 khung/giây</option>
+            <label for="fpsMode">Tốc độ khung hình</label>
+            <select id="fpsMode">
+              <option value="auto" selected>Giữ FPS gốc (hoặc 30/60 nếu lệch)</option>
+              <option value="30">30 khung/giây</option>
+              <option value="60">60 khung/giây</option>
             </select>
           </div>
           <div class="field-group">
-            <label for="preset">Tốc độ mã hóa H.265</label>
+            <label for="preset">Tốc độ mã hóa H.264</label>
             <select id="preset">
-              <option value="slow" selected>Chậm — nét nhất</option>
-              <option value="medium">Trung bình — cân bằng</option>
+              <option value="medium" selected>Trung bình — cân bằng</option>
+              <option value="slow">Chậm — nét hơn</option>
               <option value="fast">Nhanh — xuất nhanh</option>
             </select>
           </div>
           <div class="field-group">
-            <label for="crf">Chất lượng hình ảnh (CRF) <span class="label-note">(số càng thấp càng nét)</span></label>
-            <input type="number" id="crf" value="23" min="10" max="35" />
+            <label for="videoBitrateMbps">Bitrate video <span class="label-note">(1080p: 8–15 Mbps)</span></label>
+            <select id="videoBitrateMbps">
+              <option value="8">8 Mbps</option>
+              <option value="10">10 Mbps</option>
+              <option value="12" selected>12 Mbps (khuyên dùng)</option>
+              <option value="15">15 Mbps</option>
+            </select>
           </div>
           <div class="field-group">
             <label for="metadataMode">Dữ liệu ẩn trong file (metadata)</label>
@@ -1034,7 +1041,7 @@
     </form>
 
     <footer class="app-footer">
-      Mã hóa H.265 · Tự chuẩn hóa video · Hỗ trợ tiếng Việt có dấu
+      Mã hóa H.264 · AAC 44.1/48 kHz · 1080×1920 · 9:16
     </footer>
   </main>
 
@@ -1450,35 +1457,35 @@
     function applyPlatformPreset() {
       const platform = document.getElementById("platformPreset").value;
       const resolutionSelect = document.getElementById("resolution");
-      const fpsSelect = document.getElementById("fps");
+      const fpsModeSelect = document.getElementById("fpsMode");
       const presetSelect = document.getElementById("preset");
-      const crfInput = document.getElementById("crf");
+      const bitrateSelect = document.getElementById("videoBitrateMbps");
 
       if (platform === "youtube-1080p60") {
         resolutionSelect.value = "1080p";
-        fpsSelect.value = "60";
-        presetSelect.value = "slow";
-        crfInput.value = "20";
+        fpsModeSelect.value = "60";
+        presetSelect.value = "medium";
+        bitrateSelect.value = "12";
       } else if (platform === "youtube-4k60") {
         resolutionSelect.value = "4k";
-        fpsSelect.value = "60";
+        fpsModeSelect.value = "60";
         presetSelect.value = "slow";
-        crfInput.value = "22";
+        bitrateSelect.value = "15";
       } else if (platform === "tiktok-1080p60") {
         resolutionSelect.value = "1080p";
-        fpsSelect.value = "60";
+        fpsModeSelect.value = "auto";
         presetSelect.value = "medium";
-        crfInput.value = "23";
+        bitrateSelect.value = "12";
       } else if (platform === "tiktok-4k60") {
         resolutionSelect.value = "4k";
-        fpsSelect.value = "60";
+        fpsModeSelect.value = "60";
         presetSelect.value = "slow";
-        crfInput.value = "24";
+        bitrateSelect.value = "15";
       } else if (platform === "facebook-1080p60") {
         resolutionSelect.value = "1080p";
-        fpsSelect.value = "60";
-        presetSelect.value = "slow";
-        crfInput.value = "21";
+        fpsModeSelect.value = "30";
+        presetSelect.value = "medium";
+        bitrateSelect.value = "10";
       }
     }
 
@@ -1522,9 +1529,9 @@
       selectedFiles.forEach((f) => formData.append("videos", f));
       formData.append("platformPreset", document.getElementById("platformPreset").value);
       formData.append("resolution", document.getElementById("resolution").value);
-      formData.append("fps", document.getElementById("fps").value);
+      formData.append("fpsMode", document.getElementById("fpsMode").value);
       formData.append("preset", document.getElementById("preset").value);
-      formData.append("crf", document.getElementById("crf").value);
+      formData.append("videoBitrateMbps", document.getElementById("videoBitrateMbps").value);
       formData.append("metadataMode", document.getElementById("metadataMode").value);
 
       const platformPreset = document.getElementById("platformPreset").value;

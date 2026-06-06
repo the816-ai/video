@@ -318,12 +318,100 @@ function fitOutfitAnimForClip(dur, showSec) {
 
 function buildPlatformDefaults(platform) {
   const p = String(platform || "");
-  if (p === "youtube-1080p60") return { resolution: "1080p", fps: 60, crf: 20, preset: "slow" };
-  if (p === "youtube-4k60") return { resolution: "4k", fps: 60, crf: 22, preset: "slow" };
-  if (p === "tiktok-1080p60") return { resolution: "1080p", fps: 60, crf: 23, preset: "medium" };
-  if (p === "tiktok-4k60") return { resolution: "4k", fps: 60, crf: 24, preset: "slow" };
-  if (p === "facebook-1080p60") return { resolution: "1080p", fps: 60, crf: 21, preset: "slow" };
+  if (p === "youtube-1080p60") return { resolution: "1080p", fpsMode: "60", videoBitrateMbps: 12, preset: "medium" };
+  if (p === "youtube-4k60") return { resolution: "4k", fpsMode: "60", videoBitrateMbps: 40, preset: "slow" };
+  if (p === "tiktok-1080p60") return { resolution: "1080p", fpsMode: "auto", videoBitrateMbps: 12, preset: "medium" };
+  if (p === "tiktok-4k60") return { resolution: "4k", fpsMode: "60", videoBitrateMbps: 40, preset: "slow" };
+  if (p === "facebook-1080p60") return { resolution: "1080p", fpsMode: "30", videoBitrateMbps: 10, preset: "medium" };
   return null;
+}
+
+function validateFpsMode(raw) {
+  const m = String(raw || "auto").toLowerCase();
+  if (m === "30" || m === "60") return m;
+  return "auto";
+}
+
+function parseFfmpegFps(rateStr) {
+  const s = String(rateStr || "").trim();
+  const m = s.match(/^(\d+(?:\.\d+)?)\/(\d+(?:\.\d+)?)$/);
+  if (m) {
+    const den = Number(m[2]);
+    if (den > 0) return Number(m[1]) / den;
+  }
+  const n = Number(s);
+  return Number.isFinite(n) && n > 0 ? n : NaN;
+}
+
+function isNearFps(value, target, tolerance) {
+  return Number.isFinite(value) && Math.abs(value - target) <= tolerance;
+}
+
+/** Giữ FPS gốc nếu chuẩn; auto chọn 30/60 khi gốc lệch nhiều. */
+function resolveOutputFps(sourceFpsList, fpsMode) {
+  const mode = validateFpsMode(fpsMode);
+  if (mode === "30") return 30;
+  if (mode === "60") return 60;
+
+  const src = (sourceFpsList || []).filter((f) => Number.isFinite(f) && f > 0);
+  const avg = src.length ? src.reduce((a, b) => a + b, 0) / src.length : 30;
+
+  if (isNearFps(avg, 23.976, 0.02) || isNearFps(avg, 24, 0.5)) return 24;
+  if (isNearFps(avg, 25, 0.5)) return 25;
+  if (isNearFps(avg, 29.97, 0.02) || isNearFps(avg, 30, 1)) return 30;
+  if (isNearFps(avg, 50, 1)) return 50;
+  if (isNearFps(avg, 59.94, 0.02) || isNearFps(avg, 60, 2)) return 60;
+
+  return avg >= 45 ? 60 : 30;
+}
+
+function fpsFilterValue(fps) {
+  if (isNearFps(fps, 23.976, 0.02)) return "24000/1001";
+  if (isNearFps(fps, 29.97, 0.02)) return "30000/1001";
+  if (isNearFps(fps, 59.94, 0.02)) return "60000/1001";
+  return String(Math.round(fps * 1000) / 1000);
+}
+
+function getVideoBitrateSettings(resolution, videoBitrateMbps) {
+  if (resolution === "4k") {
+    const mbps = clamp(Number(videoBitrateMbps) || 40, 25, 50);
+    return {
+      target: `${mbps}M`,
+      max: `${Math.min(50, mbps + 8)}M`,
+      min: `${Math.max(25, mbps - 8)}M`,
+      bufsize: `${mbps * 2}M`,
+    };
+  }
+  const mbps = clamp(Number(videoBitrateMbps) || 12, 8, 15);
+  return {
+    target: `${mbps}M`,
+    max: `${Math.min(15, mbps + 3)}M`,
+    min: `${Math.max(8, mbps - 4)}M`,
+    bufsize: `${mbps * 2}M`,
+  };
+}
+
+function resolveAudioSampleRate(sourceRates) {
+  const rates = (sourceRates || []).filter((r) => Number.isFinite(r) && r > 0);
+  if (rates.length > 0 && rates.every((r) => Math.abs(r - 44100) < 800)) return 44100;
+  return 48000;
+}
+
+function addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset }) {
+  const br = getVideoBitrateSettings(resolution, videoBitrateMbps);
+  args.push("-c:v", "libx264");
+  args.push("-preset", validatePreset(preset));
+  args.push("-profile:v", "high");
+  args.push("-pix_fmt", "yuv420p");
+  args.push("-b:v", br.target);
+  args.push("-maxrate", br.max);
+  args.push("-minrate", br.min);
+  args.push("-bufsize", br.bufsize);
+}
+
+function addAudioEncodeArgs(args, audioSampleRate) {
+  const ar = audioSampleRate === 44100 ? 44100 : 48000;
+  args.push("-c:a", "aac", "-b:a", "192k", "-ar", String(ar));
 }
 
 function normalizeOutfitSets(outfitSets, clipCount) {
@@ -656,7 +744,7 @@ function probeFileInfo(filePath) {
   return new Promise((resolve) => {
     const args = [
       "-v", "error",
-      "-show_entries", "stream=codec_type,width,height:stream_tags=rotate:stream_side_data=rotation",
+      "-show_entries", "stream=codec_type,width,height,r_frame_rate,avg_frame_rate,sample_rate:stream_tags=rotate:stream_side_data=rotation",
       "-show_entries", "format=duration",
       "-of", "json",
       filePath,
@@ -665,19 +753,24 @@ function probeFileInfo(filePath) {
     let out = "";
     proc.stdout.on("data", (d) => { out += d.toString(); });
     proc.on("close", (code) => {
-      if (code !== 0) {
-        return resolve({ duration: NaN, hasAudio: false, width: 0, height: 0, displayWidth: 0, displayHeight: 0, rotation: 0 });
-      }
+      const empty = {
+        duration: NaN, hasAudio: false, width: 0, height: 0,
+        displayWidth: 0, displayHeight: 0, rotation: 0, fps: NaN, audioSampleRate: NaN,
+      };
+      if (code !== 0) return resolve(empty);
       try {
         const data = JSON.parse(out);
         const duration = Number(data.format?.duration);
         const streams = data.streams || [];
         const hasAudio = streams.some((s) => s.codec_type === "audio");
         const videoStream = streams.find((s) => s.codec_type === "video");
+        const audioStream = streams.find((s) => s.codec_type === "audio");
         const width = Number(videoStream?.width) || 0;
         const height = Number(videoStream?.height) || 0;
         const rotation = parseRotationFromStream(videoStream);
         const display = getDisplayDimensions(width, height, rotation);
+        const fps = parseFfmpegFps(videoStream?.avg_frame_rate) || parseFfmpegFps(videoStream?.r_frame_rate);
+        const audioSampleRate = Number(audioStream?.sample_rate) || NaN;
         resolve({
           duration: Number.isFinite(duration) ? duration : NaN,
           hasAudio,
@@ -686,12 +779,17 @@ function probeFileInfo(filePath) {
           rotation: display.rotation,
           displayWidth: display.width,
           displayHeight: display.height,
+          fps,
+          audioSampleRate,
         });
       } catch {
-        resolve({ duration: NaN, hasAudio: false, width: 0, height: 0, displayWidth: 0, displayHeight: 0, rotation: 0 });
+        resolve(empty);
       }
     });
-    proc.on("error", () => resolve({ duration: NaN, hasAudio: false, width: 0, height: 0, displayWidth: 0, displayHeight: 0, rotation: 0 }));
+    proc.on("error", () => resolve({
+      duration: NaN, hasAudio: false, width: 0, height: 0,
+      displayWidth: 0, displayHeight: 0, rotation: 0, fps: NaN, audioSampleRate: NaN,
+    }));
   });
 }
 
@@ -729,8 +827,8 @@ function translateFfmpegError(stderr) {
   if (s.includes("permission denied")) {
     return "Không có quyền ghi file đầu ra. Kiểm tra quyền thư mục outputs/.";
   }
-  if (s.includes("encoder") && s.includes("libx265")) {
-    return "FFmpeg không hỗ trợ libx265 trên máy này. Cần bản FFmpeg có mã hóa H.265.";
+  if (s.includes("encoder") && (s.includes("libx264") || s.includes("libx265"))) {
+    return "FFmpeg không hỗ trợ mã hóa H.264/H.265 trên máy này.";
   }
   return "FFmpeg báo lỗi khi xử lý. Xem chi tiết kỹ thuật bên dưới.";
 }
@@ -775,24 +873,26 @@ function buildUpscaleOutputName(originalName, resolution, index) {
   return `upscaled-${tag}-${safeOutputBaseName(originalName)}-${Date.now().toString(36)}${suffix}.mp4`;
 }
 
-function buildUpscaleFilterGraph(inputInfo, resolution, fps, aspectRatio, jobId) {
+function buildUpscaleFilterGraph(inputInfo, resolution, fps, aspectRatio, jobId, audioSampleRate) {
   const target = getTargetSize(resolution, aspectRatio || "portrait");
   const workDir = ensureJobWorkDir(jobId);
   const rotFilter = getRotationTransposeFilter(inputInfo.rotation);
   const scalePad = buildScalePadChain(inputInfo, target);
+  const fpsVal = fpsFilterValue(fps);
   const vChain = rotFilter
-    ? `[0:v]${rotFilter},${scalePad},fps=${fps},format=yuv420p[vout]`
-    : `[0:v]${scalePad},fps=${fps},format=yuv420p[vout]`;
+    ? `[0:v]${rotFilter},${scalePad},fps=${fpsVal},format=yuv420p[vout]`
+    : `[0:v]${scalePad},fps=${fpsVal},format=yuv420p[vout]`;
   const dur = Number.isFinite(inputInfo.duration) ? inputInfo.duration : 1;
+  const ar = audioSampleRate || 48000;
   const aChain = inputInfo.hasAudio
-    ? `[0:a]aformat=channel_layouts=stereo:sample_rates=48000,aresample=async=1[aout]`
-    : `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[aout]`;
+    ? `[0:a]aformat=channel_layouts=stereo:sample_rates=${ar},aresample=async=1[aout]`
+    : `anullsrc=channel_layout=stereo:sample_rate=${ar},atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[aout]`;
   const filterScript = "filter.txt";
   fs.writeFileSync(path.join(workDir, filterScript), `${vChain};${aChain}`, "utf8");
   return { workDir, filterScript };
 }
 
-function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFontPath, resolution, fps, aspectRatio, jobId }) {
+function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFontPath, resolution, fps, aspectRatio, jobId, audioSampleRate }) {
   const target = getTargetSize(resolution, aspectRatio || "landscape");
   const n = inputInfos.length;
   const parts = [];
@@ -800,11 +900,13 @@ function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFon
   let textLineCounter = 0;
   const workDir = ensureJobWorkDir(jobId);
   const fontMap = new Map();
+  const fpsVal = fpsFilterValue(fps);
+  const ar = audioSampleRate || 48000;
 
   for (let i = 0; i < n; i++) {
     const rotFilter = getRotationTransposeFilter(inputInfos[i].rotation);
     const scalePad = buildScalePadChain(inputInfos[i], target);
-    const normChain = `${scalePad},fps=${fps},format=yuv420p`;
+    const normChain = `${scalePad},fps=${fpsVal},format=yuv420p`;
     const preChain = rotFilter ? `${rotFilter},${normChain}` : normChain;
     parts.push(`[${i}:v]${preChain}[v${i}pre]`);
 
@@ -823,10 +925,10 @@ function buildFilterGraph({ inputInfos, textLines, perClipTextLines, resolvedFon
 
     const dur = Number.isFinite(inputInfos[i].duration) ? inputInfos[i].duration : 1;
     if (inputInfos[i].hasAudio) {
-      parts.push(`[${i}:a]aformat=channel_layouts=stereo:sample_rates=48000,aresample=async=1[a${i}]`);
+      parts.push(`[${i}:a]aformat=channel_layouts=stereo:sample_rates=${ar},aresample=async=1[a${i}]`);
     } else {
       parts.push(
-        `anullsrc=channel_layout=stereo:sample_rate=48000,atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`
+        `anullsrc=channel_layout=stereo:sample_rate=${ar},atrim=0:${dur.toFixed(3)},asetpts=PTS-STARTPTS[a${i}]`
       );
     }
   }
@@ -870,11 +972,12 @@ function startFfmpegJob({
   resolvedFontPath,
   resolution,
   fps,
-  crf,
+  videoBitrateMbps,
   preset,
   outputPath,
   metadata,
   aspectRatio,
+  audioSampleRate,
   progressJob,
   mapVideo = "[vout]",
   mapAudio = "[acat]",
@@ -891,6 +994,7 @@ function startFfmpegJob({
         fps,
         aspectRatio,
         jobId,
+        audioSampleRate,
       });
 
   const absOutput = path.resolve(outputPath);
@@ -898,8 +1002,8 @@ function startFfmpegJob({
   for (const f of inputs) args.push("-i", path.resolve(f));
 
   args.push("-filter_complex_script", filterScript, "-map", mapVideo, "-map", mapAudio);
-  args.push("-c:v", "libx265", "-preset", preset, "-crf", String(crf), "-pix_fmt", "yuv420p", "-tag:v", "hvc1");
-  args.push("-c:a", "aac", "-b:a", "192k");
+  addVideoEncodeArgs(args, { resolution, videoBitrateMbps, preset });
+  addAudioEncodeArgs(args, audioSampleRate);
 
   addMetadataArgs(args, metadata.mode);
   args.push(absOutput);
@@ -1004,7 +1108,7 @@ function startFfmpegJob({
 }
 
 async function processBatchUpscale(batchJob, inputPaths, metadataMode) {
-  const { resolution, fps, crf, preset, aspectRatio } = batchJob.settings;
+  const { resolution, fps, videoBitrateMbps, preset, aspectRatio, audioSampleRate } = batchJob.settings;
   const metadata = { mode: metadataMode };
 
   for (let i = 0; i < batchJob.items.length; i++) {
@@ -1041,11 +1145,12 @@ async function processBatchUpscale(batchJob, inputPaths, metadataMode) {
         resolvedFontPath: "",
         resolution,
         fps,
-        crf,
+        videoBitrateMbps,
         preset,
         outputPath: item.outputPath,
         metadata,
         aspectRatio,
+        audioSampleRate,
         progressJob,
         mapVideo: "[vout]",
         mapAudio: "[aout]",
@@ -1062,7 +1167,8 @@ async function processBatchUpscale(batchJob, inputPaths, metadataMode) {
           resolution,
           fps,
           aspectRatio,
-          subJobId
+          subJobId,
+          audioSampleRate
         ),
       });
       item.status = "done";
@@ -1152,25 +1258,32 @@ function parseOrder(raw, fileCount) {
   }
 }
 
-function resolveOutputSettings(body) {
+function resolveOutputSettings(body, inputInfos) {
   const platform = String(body.platformPreset || "custom");
   const platformDefs = platform !== "custom" ? buildPlatformDefaults(platform) : null;
+  const infos = Array.isArray(inputInfos) ? inputInfos : [];
+
+  let fpsMode = "auto";
+  let videoBitrateMbps = 12;
+  let preset = "medium";
+  let resolution = "1080p";
 
   if (platformDefs) {
-    return {
-      resolution: validateResolution(platformDefs.resolution),
-      fps: 60,
-      crf: clamp(Number(platformDefs.crf), 10, 35),
-      preset: validatePreset(platformDefs.preset),
-    };
+    resolution = validateResolution(platformDefs.resolution);
+    fpsMode = validateFpsMode(platformDefs.fpsMode);
+    videoBitrateMbps = clamp(Number(platformDefs.videoBitrateMbps), 8, 50);
+    preset = validatePreset(platformDefs.preset);
+  } else {
+    resolution = validateResolution(body.resolution || "1080p");
+    fpsMode = validateFpsMode(body.fpsMode || body.fps || "auto");
+    videoBitrateMbps = clamp(Number(body.videoBitrateMbps || body.crf || 12), 8, resolution === "4k" ? 50 : 15);
+    preset = validatePreset(body.preset || "medium");
   }
 
-  return {
-    resolution: validateResolution(body.resolution || "1080p"),
-    fps: clamp(Number(body.fps || 60), 24, 60),
-    crf: clamp(Number(body.crf || 20), 10, 35),
-    preset: validatePreset(body.preset || "slow"),
-  };
+  const outputFps = resolveOutputFps(infos.map((i) => i.fps), fpsMode);
+  const audioSampleRate = resolveAudioSampleRate(infos.map((i) => i.audioSampleRate));
+
+  return { resolution, fpsMode, outputFps, videoBitrateMbps, preset, audioSampleRate };
 }
 
 app.post("/api/process", upload.array("videos", 20), async (req, res) => {
@@ -1199,7 +1312,9 @@ app.post("/api/process", upload.array("videos", 20), async (req, res) => {
 
     const textMode = String(req.body.textMode || "manual");
     const textEnabled = parseTextEnabled(req.body.textEnabled);
-    const { resolution, fps, crf, preset } = resolveOutputSettings(req.body);
+    const inputPaths = orderedFiles.map((f) => f.path);
+    const inputInfos = await Promise.all(inputPaths.map((p) => probeFileInfo(p)));
+    const { resolution, outputFps, videoBitrateMbps, preset, audioSampleRate } = resolveOutputSettings(req.body, inputInfos);
     const aspectRatio = textMode === "outfit"
       ? validateAspectRatio(req.body.aspectRatio || "portrait")
       : validateAspectRatio(req.body.aspectRatio || "landscape");
@@ -1209,9 +1324,6 @@ app.post("/api/process", upload.array("videos", 20), async (req, res) => {
     const accessToken = crypto.randomBytes(16).toString("hex");
     const outputName = `output-${Date.now()}-${jobId.slice(0, 8)}.mp4`;
     const outputPath = path.join(OUTPUT_DIR, outputName);
-
-    const inputPaths = orderedFiles.map((f) => f.path);
-    const inputInfos = await Promise.all(inputPaths.map((p) => probeFileInfo(p)));
 
     let enabledText = [];
     let perClipTextLines = null;
@@ -1285,12 +1397,13 @@ app.post("/api/process", upload.array("videos", 20), async (req, res) => {
         perClipTextLines,
         resolvedFontPath,
         resolution,
-        fps,
-        crf,
+        fps: outputFps,
+        videoBitrateMbps,
         preset,
         outputPath,
         metadata: { mode: metadataMode },
         aspectRatio,
+        audioSampleRate,
       })
         .then(() => {
           const j = jobs.get(jobId);
@@ -1342,13 +1455,13 @@ app.post("/api/batch-upscale", upload.array("videos", 20), async (req, res) => {
       return res.status(400).json({ error: "Chưa chọn video." });
     }
 
-    const { resolution, fps, crf, preset } = resolveOutputSettings(req.body);
+    const inputInfos = await Promise.all(files.map((f) => probeFileInfo(f.path)));
+    const { resolution, outputFps, videoBitrateMbps, preset, audioSampleRate } = resolveOutputSettings(req.body, inputInfos);
     const aspectRatio = validateAspectRatio(req.body.aspectRatio || "portrait");
     const metadataMode = req.body.metadataMode === "sensitive" ? "sensitive" : "all";
 
     const jobId = crypto.randomUUID();
     const accessToken = crypto.randomBytes(16).toString("hex");
-    const inputInfos = await Promise.all(files.map((f) => probeFileInfo(f.path)));
 
     const items = files.map((f, i) => {
       const info = inputInfos[i];
@@ -1382,7 +1495,7 @@ app.post("/api/batch-upscale", upload.array("videos", 20), async (req, res) => {
       createdAt: Date.now(),
       startedAt: Date.now(),
       accessToken,
-      settings: { resolution, fps, crf, preset, aspectRatio },
+      settings: { resolution, fps: outputFps, videoBitrateMbps, preset, aspectRatio, audioSampleRate },
       items,
     };
 
